@@ -1,5 +1,5 @@
 <template>
-  <div class="dash">
+  <div class="dash" :class="{ light: !uiStore.isDark }">
 
     <!-- TOP BAR -->
     <header class="topbar">
@@ -8,23 +8,40 @@
           <div class="brand-dot"></div>
           <span class="brand-name">NEXUS</span>
         </div>
-        <div class="live-pill" :class="{ paused: streamStore.isPaused }">
+
+        <!-- Stream Status Indicator -->
+        <div class="status-pill" :class="streamStore.status">
           <span class="pulse-dot"></span>
-          {{ streamStore.isPaused ? 'PAUSED' : 'LIVE' }}
+          {{ statusLabel }}
         </div>
       </div>
+
       <div class="topbar-center">
         <span class="topbar-clock">{{ currentTime }}</span>
       </div>
+
       <div class="topbar-right">
+        <!-- Time Range Filters -->
         <div class="range-group">
-          <button v-for="r in ranges" :key="r"
-            :class="['rbtn', { active: activeRange === r }]"
-            @click="activeRange = r">{{ r }}</button>
+          <button v-for="r in ranges" :key="r.label"
+            :class="['rbtn', { active: activeRange === r.label }]"
+            @click="setRange(r)">{{ r.label }}</button>
         </div>
-        <button class="pause-btn" @click="streamStore.togglePause">
-          {{ streamStore.isPaused ? '▶' : '⏸' }}
-          <span class="pause-label">{{ streamStore.isPaused ? 'Resume' : 'Pause' }}</span>
+
+        <!-- Simulate Reconnect -->
+        <button class="icon-btn" title="Simulate reconnect" @click="streamStore.simulateReconnect">
+          ↺
+        </button>
+
+        <!-- Dark / Light Mode -->
+        <button class="icon-btn" :title="uiStore.isDark ? 'Light mode' : 'Dark mode'"
+          @click="uiStore.toggleTheme">
+          {{ uiStore.isDark ? '☀' : '☾' }}
+        </button>
+
+        <!-- Pause / Resume -->
+        <button class="pause-btn" @click="handlePauseToggle">
+          {{ streamStore.isPaused ? '▶ Resume' : '⏸ Pause' }}
         </button>
       </div>
     </header>
@@ -32,7 +49,7 @@
     <!-- METRIC CARDS -->
     <section class="metrics">
       <div v-for="(metric, i) in metricsStore.metrics" :key="metric.id"
-        class="mcard" :style="{ '--c': colors[i], '--cg': colorGlows[i] }">
+        class="mcard" :style="{ '--c': colors[i] }">
         <div class="mcard-top">
           <span class="mcard-label">{{ metric.title }}</span>
           <span class="mcard-badge" :class="metric.trend">
@@ -68,6 +85,17 @@
       </div>
     </section>
 
+    <!-- RECONNECTING OVERLAY -->
+    <Transition name="overlay">
+      <div v-if="streamStore.status === 'reconnecting'" class="reconnect-overlay">
+        <div class="reconnect-box">
+          <div class="reconnect-spinner"></div>
+          <p class="reconnect-title">Reconnecting...</p>
+          <p class="reconnect-sub">Stream interrupted. Attempting to restore connection.</p>
+        </div>
+      </div>
+    </Transition>
+
     <!-- FEED -->
     <section class="feed">
       <div class="feed-head">
@@ -93,6 +121,7 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useStreamStore } from '@/stores/streamStore'
 import { useMetricsStore } from '@/stores/metricsStore'
+import { useUiStore } from '@/stores/uiStore'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { LineChart, BarChart } from 'echarts/charts'
@@ -102,43 +131,95 @@ import dayjs from 'dayjs'
 
 use([LineChart, BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
-const streamStore = useStreamStore()
+const streamStore  = useStreamStore()
 const metricsStore = useMetricsStore()
+const uiStore      = useUiStore()
 
-const ranges = ['1M', '5M', '1H', 'LIVE']
+// ── TIME RANGES ──────────────────────────────────────────
+const ranges = [
+  { label: '1M',  minutes: 1  },
+  { label: '5M',  minutes: 5  },
+  { label: '1H',  minutes: 60 },
+  { label: 'LIVE',minutes: 0  },
+]
 const activeRange = ref('LIVE')
+const activeMinutes = ref(0)
 
-const colors     = ['#38bdf8', '#a78bfa', '#34d399', '#f472b6']
-const colorGlows = ['#38bdf820', '#a78bfa20', '#34d39920', '#f472b620']
+function setRange(r: { label: string; minutes: number }) {
+  activeRange.value = r.label
+  activeMinutes.value = r.minutes
+}
 
+// ── PAUSE — stops BOTH stream and metrics ────────────────
+function handlePauseToggle() {
+  if (streamStore.isPaused) {
+    streamStore.togglePause()
+    metricsStore.startUpdating()
+  } else {
+    streamStore.togglePause()
+    metricsStore.stopUpdating()
+  }
+}
+
+// ── STATUS LABEL ─────────────────────────────────────────
+const statusLabel = computed(() => {
+  switch (streamStore.status) {
+    case 'connected':    return 'LIVE'
+    case 'paused':       return 'PAUSED'
+    case 'reconnecting': return 'RECONNECTING'
+    case 'error':        return 'ERROR'
+    default:             return 'UNKNOWN'
+  }
+})
+
+// ── CLOCK ────────────────────────────────────────────────
 const currentTime = ref(dayjs().format('HH:mm:ss'))
 let clockTimer: ReturnType<typeof setInterval>
 
 const fmt = (ts: number) => dayjs(ts).format('HH:mm:ss')
 
-const g   = (id: string) => metricsStore.metrics.find(m => m.id === id)
-const lbs = (id: string) => computed(() => g(id)?.history.map(p => fmt(p.timestamp)) ?? [])
-const vs  = (id: string) => computed(() => g(id)?.history.map(p => +p.value.toFixed(1)) ?? [])
+// ── COLORS ───────────────────────────────────────────────
+const colors = ['#38bdf8', '#a78bfa', '#34d399', '#f472b6']
+
+// ── CHART DATA (respects time range filter) ───────────────
+const filteredHistory = (id: string) => computed(() =>
+  metricsStore.getHistory(id, activeMinutes.value)
+)
+
+const lbs = (id: string) => computed(() =>
+  filteredHistory(id).value.map(p => dayjs(p.timestamp).format('HH:mm:ss'))
+)
+const vs = (id: string) => computed(() =>
+  filteredHistory(id).value.map(p => +p.value.toFixed(1))
+)
+
+// ── CHART THEME (respects dark/light) ────────────────────
+const axisColor  = computed(() => uiStore.isDark ? '#1e3350' : '#cbd5e1')
+const labelColor = computed(() => uiStore.isDark ? '#2d4a6a' : '#94a3b8')
+const splitColor = computed(() => uiStore.isDark ? '#0d1f35' : '#e2e8f0')
+const tooltipBg  = computed(() => uiStore.isDark ? '#0b1628' : '#ffffff')
+const tooltipTxt = computed(() => uiStore.isDark ? '#94a3b8' : '#334155')
+const tooltipBdr = computed(() => uiStore.isDark ? '#1e3350' : '#e2e8f0')
 
 const chartBase = () => ({
   backgroundColor: 'transparent',
   grid: { left: 44, right: 8, top: 8, bottom: 28 },
   tooltip: {
     trigger: 'axis',
-    backgroundColor: '#0b1628',
-    borderColor: '#1e3350',
-    textStyle: { color: '#94a3b8', fontSize: 11 }
+    backgroundColor: tooltipBg.value,
+    borderColor: tooltipBdr.value,
+    textStyle: { color: tooltipTxt.value, fontSize: 11 }
   },
   xAxis: {
     type: 'category',
-    axisLine: { lineStyle: { color: '#1e3350' } },
+    axisLine: { lineStyle: { color: axisColor.value } },
     axisTick: { show: false },
-    axisLabel: { color: '#2d4a6a', fontSize: 9 }
+    axisLabel: { color: labelColor.value, fontSize: 9 }
   },
   yAxis: {
     type: 'value',
-    splitLine: { lineStyle: { color: '#0d1f35', type: 'dashed' } },
-    axisLabel: { color: '#2d4a6a', fontSize: 9 }
+    splitLine: { lineStyle: { color: splitColor.value, type: 'dashed' } },
+    axisLabel: { color: labelColor.value, fontSize: 9 }
   }
 })
 
@@ -148,7 +229,8 @@ const lineOpt = computed(() => ({
   series: [{
     type: 'line', data: vs('cpu').value, smooth: true,
     color: '#38bdf8', showSymbol: false, lineStyle: { width: 2 },
-    areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: '#38bdf825' }, { offset: 1, color: '#38bdf800' }] } }
+    areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+      colorStops: [{ offset: 0, color: '#38bdf825' }, { offset: 1, color: '#38bdf800' }] } }
   }]
 }))
 
@@ -167,7 +249,8 @@ const areaOpt = computed(() => ({
   series: [{
     type: 'line', data: vs('network').value, smooth: true,
     color: '#34d399', showSymbol: false, lineStyle: { width: 2 },
-    areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: '#34d39925' }, { offset: 1, color: '#34d39900' }] } }
+    areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+      colorStops: [{ offset: 0, color: '#34d39925' }, { offset: 1, color: '#34d39900' }] } }
   }]
 }))
 
@@ -177,11 +260,14 @@ const reqOpt = computed(() => ({
   series: [{
     type: 'line', data: vs('requests').value, smooth: true,
     color: '#f472b6', showSymbol: false, lineStyle: { width: 2 },
-    areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: '#f472b625' }, { offset: 1, color: '#f472b600' }] } }
+    areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+      colorStops: [{ offset: 0, color: '#f472b625' }, { offset: 1, color: '#f472b600' }] } }
   }]
 }))
 
+// ── LIFECYCLE ────────────────────────────────────────────
 onMounted(() => {
+  uiStore.init()
   streamStore.startStream()
   metricsStore.startUpdating()
   clockTimer = setInterval(() => { currentTime.value = dayjs().format('HH:mm:ss') }, 1000)
@@ -199,17 +285,42 @@ onUnmounted(() => {
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ── THEME TOKENS ── */
+.dash {
+  --bg:        #040c18;
+  --bg2:       #060f1f;
+  --border:    #0a1e35;
+  --border2:   #0f2240;
+  --text:      #cbd5e1;
+  --text-dim:  #334e68;
+  --text-mute: #1e3a5a;
+  --hover:     #07111f;
+}
+
+.dash.light {
+  --bg:        #f0f4f8;
+  --bg2:       #ffffff;
+  --border:    #dde3ea;
+  --border2:   #c8d0da;
+  --text:      #1e293b;
+  --text-dim:  #64748b;
+  --text-mute: #94a3b8;
+  --hover:     #f8fafc;
+}
+
 /* ── ROOT ── */
 .dash {
   width: 100vw;
-  min-height: 100vh;
   height: 100vh;
-  background: #040c18;
+  min-height: 100vh;
+  background: var(--bg);
   display: flex;
   flex-direction: column;
   font-family: 'Inter', sans-serif;
-  color: #cbd5e1;
+  color: var(--text);
   overflow: hidden;
+  position: relative;
+  transition: background 0.3s, color 0.3s;
 }
 
 /* ── TOPBAR ── */
@@ -220,8 +331,8 @@ onUnmounted(() => {
   justify-content: space-between;
   padding: 0 20px;
   height: 52px;
-  background: #060f1f;
-  border-bottom: 1px solid #0f2240;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
   position: relative;
   gap: 12px;
 }
@@ -231,84 +342,98 @@ onUnmounted(() => {
   position: absolute; left: 50%; transform: translateX(-50%);
   pointer-events: none;
 }
-.topbar-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin-left: auto; }
+.topbar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
 
 .brand { display: flex; align-items: center; gap: 8px; }
 .brand-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  background: #38bdf8;
-  box-shadow: 0 0 8px #38bdf8aa;
+  background: #38bdf8; box-shadow: 0 0 8px #38bdf8aa;
 }
 .brand-name {
   font-family: 'IBM Plex Mono', monospace;
   font-size: 13px; font-weight: 500;
-  letter-spacing: 0.18em; color: #e2e8f0;
+  letter-spacing: 0.18em; color: var(--text);
 }
 
-.live-pill {
+/* ── STATUS PILL ── */
+.status-pill {
   display: flex; align-items: center; gap: 6px;
   padding: 3px 10px; border-radius: 20px;
-  background: #03180d; border: 1px solid #0a4020;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 10px; font-weight: 500;
-  color: #34d399; letter-spacing: 0.1em;
-  white-space: nowrap;
+  letter-spacing: 0.1em; white-space: nowrap;
+  transition: all 0.3s;
 }
-.live-pill.paused { background: #160f00; border-color: #4a3000; color: #fbbf24; }
+.status-pill.connected    { background: #03180d; border: 1px solid #0a4020; color: #34d399; }
+.status-pill.paused       { background: #160f00; border: 1px solid #4a3000; color: #fbbf24; }
+.status-pill.reconnecting { background: #0d0a1f; border: 1px solid #2d1a6a; color: #a78bfa; }
+.status-pill.error        { background: #1a0505; border: 1px solid #4a0a0a; color: #f87171; }
+
+.dash.light .status-pill.connected    { background: #dcfce7; border-color: #86efac; color: #16a34a; }
+.dash.light .status-pill.paused       { background: #fef9c3; border-color: #fde047; color: #ca8a04; }
+.dash.light .status-pill.reconnecting { background: #ede9fe; border-color: #c4b5fd; color: #7c3aed; }
+.dash.light .status-pill.error        { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
 
 .pulse-dot {
   width: 6px; height: 6px; border-radius: 50%; background: currentColor;
   animation: blink 1.4s infinite;
 }
-.live-pill.paused .pulse-dot { animation: none; }
+.status-pill.paused .pulse-dot,
+.status-pill.error .pulse-dot { animation: none; }
+.status-pill.reconnecting .pulse-dot { animation: blink 0.6s infinite; }
 
 .topbar-clock {
   font-family: 'IBM Plex Mono', monospace;
   font-size: 20px; font-weight: 400;
-  color: #e2e8f0; letter-spacing: 0.12em;
+  color: var(--text); letter-spacing: 0.12em;
 }
 
+/* ── RANGE BUTTONS ── */
 .range-group {
   display: flex;
-  background: #060f1f; border: 1px solid #0f2240; border-radius: 6px; overflow: hidden;
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: 6px; overflow: hidden;
 }
 .rbtn {
   padding: 4px 10px; background: transparent; border: none;
-  color: #2d4a6a; font-size: 10px; font-weight: 600;
+  color: var(--text-mute); font-size: 10px; font-weight: 600;
   font-family: 'IBM Plex Mono', monospace;
-  letter-spacing: 0.06em; cursor: pointer; transition: all 0.2s;
-  white-space: nowrap;
+  letter-spacing: 0.06em; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
-.rbtn:hover { color: #64748b; }
-.rbtn.active { background: #0f2240; color: #38bdf8; }
+.rbtn:hover { color: var(--text-dim); }
+.rbtn.active { background: var(--border); color: #38bdf8; }
+
+/* ── ICON BUTTONS ── */
+.icon-btn {
+  width: 32px; height: 32px;
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: 6px;
+  color: var(--text-dim); font-size: 16px;
+  cursor: pointer; transition: all 0.2s;
+  display: flex; align-items: center; justify-content: center;
+}
+.icon-btn:hover { border-color: #38bdf8; color: #38bdf8; }
 
 .pause-btn {
   display: flex; align-items: center; gap: 6px;
   padding: 5px 14px;
-  background: #060f1f; border: 1px solid #0f2240; border-radius: 6px;
-  color: #64748b; font-size: 11px; font-weight: 500;
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: 6px;
+  color: var(--text-dim); font-size: 11px; font-weight: 500;
   font-family: 'Inter', sans-serif;
-  cursor: pointer; transition: all 0.2s;
-  white-space: nowrap;
+  cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
-.pause-btn:hover { border-color: #1e3a5a; color: #e2e8f0; }
+.pause-btn:hover { border-color: #38bdf8; color: var(--text); }
 
 /* ── METRICS ── */
 .metrics {
   flex-shrink: 0;
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 1px;
-  background: #0a1e35;
-  border-bottom: 1px solid #0a1e35;
+  gap: 1px; background: var(--border);
+  border-bottom: 1px solid var(--border);
 }
 
 .mcard {
-  background: #060f1f;
-  padding: 16px 20px;
-  position: relative;
-  overflow: hidden;
-  transition: background 0.2s;
+  background: var(--bg2); padding: 16px 20px;
+  position: relative; overflow: hidden; transition: background 0.2s;
 }
 .mcard::after {
   content: ''; position: absolute;
@@ -316,106 +441,100 @@ onUnmounted(() => {
   background: var(--c); opacity: 0.7;
 }
 
-.mcard-top {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 6px;
-}
+.mcard-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .mcard-label {
-  font-size: 10px; font-weight: 600; color: #334e68;
-  font-family: 'IBM Plex Mono', monospace;
-  letter-spacing: 0.1em; text-transform: uppercase;
+  font-size: 10px; font-weight: 600; color: var(--text-dim);
+  font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.1em; text-transform: uppercase;
 }
 .mcard-badge { font-size: 13px; font-weight: 700; }
 .mcard-badge.up     { color: #34d399; }
 .mcard-badge.down   { color: #f87171; }
-.mcard-badge.stable { color: #334e68; }
+.mcard-badge.stable { color: var(--text-mute); }
 
 .mcard-val {
-  font-size: clamp(24px, 3vw, 34px);
-  font-weight: 700; color: var(--c);
-  font-variant-numeric: tabular-nums; line-height: 1;
-  margin-bottom: 12px;
+  font-size: clamp(22px, 2.5vw, 34px); font-weight: 700; color: var(--c);
+  font-variant-numeric: tabular-nums; line-height: 1; margin-bottom: 12px;
 }
 .mcard-val small {
-  font-size: 11px; color: #334e68;
-  font-family: 'IBM Plex Mono', monospace;
-  margin-left: 3px; font-weight: 400;
+  font-size: 11px; color: var(--text-dim);
+  font-family: 'IBM Plex Mono', monospace; margin-left: 3px; font-weight: 400;
 }
-
-.mcard-track { height: 2px; background: #0a1e35; border-radius: 1px; overflow: hidden; }
-.mcard-fill  {
-  height: 100%; background: var(--c); border-radius: 1px;
-  transition: width 1s ease; max-width: 100%;
-}
+.mcard-track { height: 2px; background: var(--border); border-radius: 1px; overflow: hidden; }
+.mcard-fill  { height: 100%; background: var(--c); border-radius: 1px; transition: width 1s ease; max-width: 100%; }
 
 /* ── CHARTS ── */
 .charts {
   flex: 1;
   display: grid;
   grid-template-columns: 2fr 1fr 1fr 1fr;
-  gap: 1px;
-  background: #0a1e35;
-  min-height: 0;
+  gap: 1px; background: var(--border); min-height: 0;
 }
 
 .chart-box {
-  background: #060f1f;
-  padding: 12px 14px 6px;
-  display: flex; flex-direction: column;
-  min-width: 0; min-height: 0;
-  overflow: hidden;
+  background: var(--bg2); padding: 12px 14px 6px;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
 }
-
 .chart-label {
-  font-size: 10px; font-weight: 600; color: #334e68;
-  font-family: 'IBM Plex Mono', monospace;
-  letter-spacing: 0.1em; text-transform: uppercase;
-  margin-bottom: 4px; flex-shrink: 0;
-  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; font-weight: 600; color: var(--text-dim);
+  font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.1em; text-transform: uppercase;
+  margin-bottom: 4px; flex-shrink: 0; display: flex; align-items: center; gap: 6px;
 }
 .chart-label em {
-  font-style: normal;
-  padding: 1px 5px; border-radius: 3px;
-  background: #0a1e35; color: #1e3a5a;
+  font-style: normal; padding: 1px 5px; border-radius: 3px;
+  background: var(--border); color: var(--text-mute);
   font-size: 8px; letter-spacing: 0.12em;
 }
-
 .vchart { flex: 1; min-height: 0; width: 100%; }
+
+/* ── RECONNECT OVERLAY ── */
+.reconnect-overlay {
+  position: absolute; inset: 0; z-index: 50;
+  background: rgba(4, 12, 24, 0.85);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+}
+.dash.light .reconnect-overlay { background: rgba(240, 244, 248, 0.85); }
+
+.reconnect-box {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 40px 48px; border-radius: 16px;
+  background: var(--bg2); border: 1px solid #2d1a6a;
+  box-shadow: 0 0 40px #a78bfa22;
+}
+.reconnect-spinner {
+  width: 40px; height: 40px; border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: #a78bfa;
+  animation: spin 0.8s linear infinite;
+}
+.reconnect-title { font-size: 16px; font-weight: 600; color: #a78bfa; }
+.reconnect-sub { font-size: 12px; color: var(--text-dim); text-align: center; max-width: 260px; }
 
 /* ── FEED ── */
 .feed {
-  flex-shrink: 0;
-  height: 190px;
-  background: #060f1f;
-  border-top: 1px solid #0a1e35;
+  flex-shrink: 0; height: 190px;
+  background: var(--bg2); border-top: 1px solid var(--border);
   display: flex; flex-direction: column;
 }
-
 .feed-head {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 10px 20px 6px;
-  border-bottom: 1px solid #091828;
-  flex-shrink: 0;
+  padding: 10px 20px 6px; border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
 .feed-title {
-  font-size: 10px; font-weight: 600; color: #334e68;
+  font-size: 10px; font-weight: 600; color: var(--text-dim);
   font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.1em; text-transform: uppercase;
 }
-.feed-count { font-size: 10px; color: #162030; font-family: 'IBM Plex Mono', monospace; }
-
+.feed-count { font-size: 10px; color: var(--text-mute); font-family: 'IBM Plex Mono', monospace; }
 .feed-body { flex: 1; overflow-y: auto; }
 .feed-body::-webkit-scrollbar { width: 2px; }
-.feed-body::-webkit-scrollbar-thumb { background: #0a1e35; }
+.feed-body::-webkit-scrollbar-thumb { background: var(--border); }
 
 .feed-row {
-  display: grid;
-  grid-template-columns: 8px 68px 1fr auto;
-  align-items: center;
-  gap: 14px;
-  padding: 6px 20px;
-  border-bottom: 1px solid #060f1c;
+  display: grid; grid-template-columns: 8px 68px 1fr auto;
+  align-items: center; gap: 14px; padding: 6px 20px;
+  border-bottom: 1px solid var(--bg);
 }
-.feed-row:hover { background: #07111f; }
+.feed-row:hover { background: var(--hover); }
 
 .fdot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .fdot.error   { background: #f87171; box-shadow: 0 0 5px #f8717180; }
@@ -423,9 +542,8 @@ onUnmounted(() => {
 .fdot.info    { background: #38bdf8; box-shadow: 0 0 5px #38bdf880; }
 .fdot.alert   { background: #a78bfa; box-shadow: 0 0 5px #a78bfa80; }
 
-.ftime { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: #1e3a5a; flex-shrink: 0; }
-.fmsg  { font-size: 12px; color: #4a6480; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
+.ftime { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text-mute); flex-shrink: 0; }
+.fmsg  { font-size: 12px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ftag  { font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.1em; flex-shrink: 0; }
 .ftag.error   { color: #f87171; }
 .ftag.warning { color: #fbbf24; }
@@ -434,56 +552,33 @@ onUnmounted(() => {
 
 /* ── ANIMATIONS ── */
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.15; } }
+@keyframes spin   { to { transform: rotate(360deg); } }
+
+.overlay-enter-active, .overlay-leave-active { transition: opacity 0.3s ease; }
+.overlay-enter-from, .overlay-leave-to { opacity: 0; }
+
 .row-enter-active { transition: all 0.2s ease; }
 .row-enter-from   { opacity: 0; transform: translateY(-4px); }
 
 /* ── RESPONSIVE ── */
-
-/* Tablet: 2x2 charts, 2x2 metrics */
 @media (max-width: 1024px) {
-  .charts {
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
-  }
-  .c-wide { grid-column: span 1; }
+  .charts { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .feed { height: 160px; }
   .topbar-clock { font-size: 16px; }
 }
 
-/* Mobile: single column, scrollable */
 @media (max-width: 640px) {
-  .dash {
-    height: auto;
-    min-height: 100vh;
-    overflow-y: auto;
-  }
-  .topbar {
-    padding: 0 12px;
-    height: 48px;
-    gap: 8px;
-  }
+  .dash { height: auto; overflow-y: auto; }
+  .topbar { padding: 0 12px; height: 48px; }
   .topbar-center { display: none; }
-  .brand-name { font-size: 11px; letter-spacing: 0.12em; }
-  .live-pill { padding: 3px 8px; font-size: 9px; }
   .range-group { display: none; }
-  .pause-label { display: none; }
-  .pause-btn { padding: 5px 10px; }
-
-  .metrics {
-    grid-template-columns: repeat(2, 1fr);
-  }
+  .brand-name { font-size: 11px; }
+  .metrics { grid-template-columns: repeat(2, 1fr); }
   .mcard { padding: 12px 14px; }
-
-  .charts {
-    grid-template-columns: 1fr;
-    grid-template-rows: repeat(4, 200px);
-    flex: none;
-  }
+  .charts { grid-template-columns: 1fr; flex: none; }
   .vchart { height: 160px; }
-
   .feed { height: auto; max-height: 280px; }
   .feed-row { grid-template-columns: 8px 60px 1fr auto; gap: 8px; padding: 6px 12px; }
-  .fmsg { font-size: 11px; }
 }
 </style>
