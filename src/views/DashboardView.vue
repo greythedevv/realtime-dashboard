@@ -561,24 +561,104 @@ onUnmounted(() => {
 .row-enter-from   { opacity: 0; transform: translateY(-4px); }
 
 /* ── RESPONSIVE ── */
+/* ── RESPONSIVE ── */
 @media (max-width: 1024px) {
-  .charts { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+  .charts {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+  }
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .feed { height: 160px; }
   .topbar-clock { font-size: 16px; }
 }
 
 @media (max-width: 640px) {
-  .dash { height: auto; overflow-y: auto; }
-  .topbar { padding: 0 12px; height: 48px; }
+  /* Allow scroll on mobile */
+  .dash {
+    height: auto;
+    min-height: 100vh;
+    overflow-x: hidden;
+    overflow-y: auto;
+    width: 100vw;
+  }
+
+  /* Topbar — tighter, no overflow */
+  .topbar {
+    padding: 0 10px;
+    height: 44px;
+    gap: 6px;
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
   .topbar-center { display: none; }
+  .topbar-left { gap: 8px; min-width: 0; flex-shrink: 1; }
+  .topbar-right { gap: 6px; flex-shrink: 0; }
+  .brand-name { font-size: 10px; letter-spacing: 0.1em; }
   .range-group { display: none; }
-  .brand-name { font-size: 11px; }
-  .metrics { grid-template-columns: repeat(2, 1fr); }
-  .mcard { padding: 12px 14px; }
-  .charts { grid-template-columns: 1fr; flex: none; }
-  .vchart { height: 160px; }
-  .feed { height: auto; max-height: 280px; }
-  .feed-row { grid-template-columns: 8px 60px 1fr auto; gap: 8px; padding: 6px 12px; }
+
+  /* Hide pause label text, show icon only */
+  .pause-btn {
+    padding: 4px 8px;
+    font-size: 10px;
+  }
+
+  /* Status pill smaller */
+  .status-pill {
+    padding: 2px 7px;
+    font-size: 9px;
+  }
+
+  /* Metric cards — 2 col, no overflow */
+  .metrics {
+    grid-template-columns: repeat(2, 1fr);
+    flex-shrink: 0;
+  }
+  .mcard {
+    padding: 10px 12px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .mcard-val {
+    font-size: 22px;
+  }
+  .mcard-val small { font-size: 10px; }
+  .mcard-label { font-size: 9px; }
+
+  /* Charts — single column, fixed height, no overflow */
+  .charts {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    gap: 1px;
+    width: 100%;
+    overflow: hidden;
+  }
+  .chart-box {
+    width: 100%;
+    min-width: 0;
+    height: 200px;
+    flex-shrink: 0;
+    overflow: hidden;
+    padding: 10px 10px 6px;
+  }
+  .vchart {
+    width: 100% !important;
+    height: 155px !important;
+  }
+
+  /* Feed */
+  .feed {
+    height: auto;
+    max-height: 260px;
+    flex-shrink: 0;
+  }
+  .feed-row {
+    grid-template-columns: 6px 56px 1fr auto;
+    gap: 8px;
+    padding: 5px 10px;
+  }
+  .fmsg { font-size: 11px; }
+  .ftag { font-size: 8px; }
+  .ftime { font-size: 9px; }
 }
 </style>
