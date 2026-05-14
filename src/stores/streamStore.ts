@@ -10,18 +10,18 @@ export const useStreamStore = defineStore('stream', () => {
   const events = ref<StreamEvent[]>([])
   const isPaused = ref(false)
   let intervalId: ReturnType<typeof setInterval> | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+  function pushEvent() {
+    const event = generateStreamEvent()
+    events.value.unshift(event)
+    if (events.value.length > MAX_EVENTS) events.value.pop()
+  }
 
   function startStream() {
     if (intervalId) return
-    intervalId = setInterval(() => {
-      if (isPaused.value) return
-      const event = generateStreamEvent()
-      events.value.unshift(event)           // newest first
-      if (events.value.length > MAX_EVENTS) {
-        events.value.pop()                  // prevent memory leak
-      }
-    }, 800)
     status.value = 'connected'
+    intervalId = setInterval(pushEvent, 800)
   }
 
   function stopStream() {
@@ -32,14 +32,41 @@ export const useStreamStore = defineStore('stream', () => {
   }
 
   function togglePause() {
-    isPaused.value = !isPaused.value
-    status.value = isPaused.value ? 'paused' : 'connected'
+    if (isPaused.value) {
+      // Resume
+      isPaused.value = false
+      startStream()
+    } else {
+      // Pause — actually stop the interval
+      isPaused.value = true
+      status.value = 'paused'
+      stopStream()
+    }
   }
 
-  // Clean up on unmount
-  function cleanup() { stopStream() }
+  // Simulate a disconnect + reconnect after 3 seconds
+  function simulateReconnect() {
+    stopStream()
+    status.value = 'reconnecting'
+    isPaused.value = false
+
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    reconnectTimer = setTimeout(() => {
+      status.value = 'connected'
+      startStream()
+    }, 3000)
+  }
+
+  function cleanup() {
+    stopStream()
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+  }
 
   const recentEvents = computed(() => events.value.slice(0, 50))
 
-  return { status, events, isPaused, recentEvents, startStream, stopStream, togglePause, cleanup }
+  return {
+    status, events, isPaused, recentEvents,
+    startStream, stopStream, togglePause,
+    simulateReconnect, cleanup
+  }
 })
